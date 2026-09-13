@@ -2,14 +2,8 @@ import React from 'react';
 import { 
   Play, 
   Pause, 
-  RotateCcw, 
   Layers, 
-  Clock, 
-  Gauge, 
   Eye, 
-  Sparkles, 
-  Sliders, 
-  Check, 
   X 
 } from 'lucide-react';
 import { ToolpathLayer, ToolpathSimulationState } from '../types';

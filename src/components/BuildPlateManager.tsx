@@ -13,7 +13,6 @@ import {
   Layers, 
   X, 
   ChevronDown, 
-  Check, 
   Grid
 } from 'lucide-react';
 import { PlacedModel, PlateNestingConfig } from '../types';

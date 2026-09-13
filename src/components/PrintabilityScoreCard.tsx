@@ -5,11 +5,7 @@ import {
   Rotate3d, 
   Sparkles, 
   CheckCircle2, 
-  Layers, 
-  Activity, 
-  Info,
   X,
-  Compass
 } from 'lucide-react';
 import { PrintabilityAuditResult } from '../types';
 

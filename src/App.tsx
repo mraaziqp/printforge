@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useState, useEffect } from 'react';
+import { useState, useEffect } from 'react';
 import { 
   TabType, 
   MarketplaceModel, 
@@ -25,15 +25,7 @@ import { CreatorHubView } from './components/CreatorHubView';
 import { ModelDetailModal } from './components/ModelDetailModal';
 import { WalletModal } from './components/WalletModal';
 import { SettingsModal } from './components/SettingsModal';
-import { 
-  Layers, 
-  Store, 
-  Sparkles, 
-  Radio, 
-  ShieldCheck, 
-  Cpu,
-  Github
-} from 'lucide-react';
+import { pingBridge } from './utils/bridgeClient';
 
 const STORAGE_KEYS = {
   WALLET: 'printforge_wallet_balance',
@@ -120,6 +112,22 @@ export default function App() {
   const [isWalletModalOpen, setIsWalletModalOpen] = useState<boolean>(false);
   const [isSettingsModalOpen, setIsSettingsModalOpen] = useState<boolean>(false);
   const [preloadedDraft, setPreloadedDraft] = useState<PreloadedUploadDraft | null>(null);
+
+  // Keep the navbar's bridge indicator accurate on every tab (AI Studio adds detailed logging on top)
+  useEffect(() => {
+    let cancelled = false;
+    const check = () => {
+      pingBridge(settings.localRelayUrl)
+        .then(() => !cancelled && setSettings((prev) => (prev.isLocalRelayOnline ? prev : { ...prev, isLocalRelayOnline: true })))
+        .catch(() => !cancelled && setSettings((prev) => (prev.isLocalRelayOnline ? { ...prev, isLocalRelayOnline: false } : prev)));
+    };
+    check();
+    const timer = setInterval(check, 15000);
+    return () => {
+      cancelled = true;
+      clearInterval(timer);
+    };
+  }, [settings.localRelayUrl]);
 
   // Sync state to LocalStorage
   useEffect(() => {

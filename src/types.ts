@@ -137,18 +137,51 @@ export interface PreloadedUploadDraft {
   coverUrl?: string;
 }
 
+// Shapes returned by the local bridge (server/bridge.py)
 export interface BridgeJobStatus {
   prompt_id: string;
   status: 'queued' | 'diffusing' | 'meshing' | 'exporting' | 'completed' | 'failed';
+  stage?: string;
   stage_name: string;
   progress_pct: number;
-  mesh_url?: string;
-  error?: string;
+  node?: string | null;
+  node_label?: string | null;
+  step?: number | null;
+  total_steps?: number | null;
+  iteration_rate?: number | null;
+  eta_seconds?: number | null;
+  elapsed_seconds?: number;
+  mesh_url?: string | null;
+  mesh_filename?: string | null;
+  stl_url?: string | null;
+  preview_url?: string | null;
+  error?: string | null;
   hardware_metrics?: {
     vram_used_mb?: number;
+    vram_total_mb?: number;
     gpu_temp_c?: number;
+    gpu_util_pct?: number;
     worker_device?: string;
   };
+}
+
+export interface BridgeHealth {
+  service: 'printforge-bridge';
+  version: string;
+  ok: boolean;
+  comfyui: {
+    url: string;
+    reachable: boolean;
+    version?: string;
+    devices?: { name: string; vram_total_mb?: number | null; vram_free_mb?: number | null }[];
+  };
+  upstream_ws_connected: boolean;
+  workflow: string;
+  workflow_error: string | null;
+  models_checked: boolean;
+  missing_models: string[];
+  missing_nodes: string[];
+  active_jobs: number;
 }
 
 export interface AppSettings {
@@ -216,6 +249,11 @@ export interface PrintabilityAuditResult {
 // Live Hardware Telemetry & WebSocket Progress
 export interface BridgeWebSocketMessage {
   type: 'step' | 'progress' | 'status' | 'complete' | 'error';
+  promptId?: string;
+  status?: BridgeJobStatus['status'];
+  error?: string;
+  stlUrl?: string;
+  previewUrl?: string;
   step?: number;
   totalSteps?: number;
   samplerName?: string;

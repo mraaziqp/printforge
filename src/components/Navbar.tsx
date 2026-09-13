@@ -6,12 +6,8 @@ import {
   Wallet, 
   Radio, 
   Settings as SettingsIcon, 
-  Cpu, 
   Store, 
   Layers, 
-  Flame,
-  CheckCircle2,
-  XCircle,
   Plus
 } from 'lucide-react';
 import { TabType, AppSettings } from '../types';

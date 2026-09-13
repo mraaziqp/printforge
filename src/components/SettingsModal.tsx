@@ -4,14 +4,11 @@ import {
   Settings as SettingsIcon, 
   Radio, 
   Percent, 
-  RefreshCw, 
   CheckCircle2, 
   Cpu, 
-  Sliders,
   RotateCcw,
   HardDrive,
   Trash2,
-  Database
 } from 'lucide-react';
 import { AppSettings, StorageStats } from '../types';
 import { getStorageStats, clearIndexedDatabase } from '../utils/meshDatabase';

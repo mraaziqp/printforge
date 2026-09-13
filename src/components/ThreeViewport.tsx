@@ -14,9 +14,7 @@ import {
   ArrowDownToLine,
   ShieldCheck,
   Wrench,
-  Download,
   Sparkles,
-  Rotate3d,
   Boxes,
   Camera
 } from 'lucide-react';
@@ -56,7 +54,7 @@ import {
   createVirtualNozzleMesh 
 } from '../utils/toolpathGenerator';
 import { createProceduralGeometry } from '../utils/geometryGenerator';
-import { cacheStudioSnapshot, cacheMeshBinary } from '../utils/meshDatabase';
+import { cacheStudioSnapshot } from '../utils/meshDatabase';
 
 interface ThreeViewportProps {
   geometry: THREE.BufferGeometry;
@@ -79,7 +77,6 @@ interface ThreeViewportProps {
 
 export const ThreeViewport: React.FC<ThreeViewportProps> = ({
   geometry,
-  meshUrl,
   filamentType = 'PLA',
   dimensionsMm,
   autoRotateDefault = false,
@@ -181,6 +178,11 @@ export const ThreeViewport: React.FC<ThreeViewportProps> = ({
 
   const filamentSpec = FILAMENT_SPECS[filamentType] || FILAMENT_SPECS.PLA;
   const meshColor = filamentSpec.color;
+
+  // The render loop is created once per WebGL context, so it reads live UI state through this ref
+  // instead of the values captured when the scene was initialized.
+  const animStateRef = useRef({ autoRotate, turntableActive, isGenerating, isToolpathMode, simulationState, toolpathLayers });
+  animStateRef.current = { autoRotate, turntableActive, isGenerating, isToolpathMode, simulationState, toolpathLayers };
 
   // Initialize primary placedModel when geometry changes
   useEffect(() => {
@@ -317,7 +319,7 @@ export const ThreeViewport: React.FC<ThreeViewportProps> = ({
 
   // Apply modified geometry from Drawer
   const handleApplyModifiedGeometry = useCallback(
-    (newGeo: THREE.BufferGeometry, actionLabel: string) => {
+    (newGeo: THREE.BufferGeometry, _actionLabel: string) => {
       if (!threeRefs.current) return;
       const { mesh, boxHelper } = threeRefs.current;
 
@@ -556,11 +558,7 @@ export const ThreeViewport: React.FC<ThreeViewportProps> = ({
   const handleCaptureSnapshot = useCallback(
     async (config: StudioSnapshotConfig): Promise<string | null> => {
       if (!threeRefs.current) return null;
-      const { renderer, scene, camera, controls } = threeRefs.current;
-
-      const origWidth = renderer.domElement.width;
-      const origHeight = renderer.domElement.height;
-      const origAspect = camera.aspect;
+      const { renderer, scene, camera } = threeRefs.current;
 
       // Switch to target snapshot resolution
       renderer.setSize(config.width, config.height, false);
@@ -646,7 +644,7 @@ export const ThreeViewport: React.FC<ThreeViewportProps> = ({
     renderer.setSize(width, heightPx);
     renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
     renderer.shadowMap.enabled = true;
-    renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+    renderer.shadowMap.type = THREE.PCFShadowMap;
     renderer.localClippingEnabled = true;
 
     const controls = new OrbitControls(camera, renderer.domElement);
@@ -779,15 +777,17 @@ export const ThreeViewport: React.FC<ThreeViewportProps> = ({
     const animate = () => {
       animId = requestAnimationFrame(animate);
       if (threeRefs.current) {
+        const anim = animStateRef.current;
+
         // Auto-rotation or Turntable Spin
-        if (autoRotate || turntableActive) {
+        if (anim.autoRotate || anim.turntableActive) {
           threeRefs.current.mesh.rotation.y += 0.008;
           threeRefs.current.plateGroup.rotation.y += 0.008;
           threeRefs.current.boxHelper.update();
         }
 
         // Holographic Progress Ring
-        if (threeRefs.current.holographicRing && isGenerating) {
+        if (threeRefs.current.holographicRing && anim.isGenerating) {
           threeRefs.current.holographicRing.visible = true;
           threeRefs.current.holographicRing.rotation.z += 0.04;
         } else if (threeRefs.current.holographicRing) {
@@ -795,13 +795,14 @@ export const ThreeViewport: React.FC<ThreeViewportProps> = ({
         }
 
         // Toolpath simulation playback logic
-        if (isToolpathMode && simulationState.isPlaying && toolpathLayers.length > 0) {
+        const layers = anim.toolpathLayers;
+        if (anim.isToolpathMode && anim.simulationState.isPlaying && layers.length > 0) {
           simTimer += 1;
-          const stepInterval = Math.max(1, Math.round(6 / simulationState.playbackSpeed));
+          const stepInterval = Math.max(1, Math.round(6 / anim.simulationState.playbackSpeed));
 
           if (simTimer % stepInterval === 0) {
             setSimulationState((prev) => {
-              const currentL = toolpathLayers[prev.currentLayer];
+              const currentL = layers[prev.currentLayer];
               if (!currentL || currentL.segments.length === 0) return prev;
 
               let nextProg = prev.animProgress + 0.035 * prev.playbackSpeed;
@@ -809,7 +810,7 @@ export const ThreeViewport: React.FC<ThreeViewportProps> = ({
 
               if (nextProg >= 1.0) {
                 nextProg = 0;
-                nextLayer = (prev.currentLayer + 1) % toolpathLayers.length;
+                nextLayer = (prev.currentLayer + 1) % layers.length;
                 setCurrentToolpathLayer(nextLayer);
               }
 
@@ -860,25 +861,28 @@ export const ThreeViewport: React.FC<ThreeViewportProps> = ({
     return () => {
       cancelAnimationFrame(animId);
       resizeObserver.disconnect();
-      renderer.dispose();
-      bedGeo.dispose();
-      bedMat.dispose();
-      bedBorderGeo.dispose();
-      bedBorderMat.dispose();
-      holoRingGeo.dispose();
-      holoRingMat.dispose();
-      standardMaterial.dispose();
-      if (heatmapMaterialRef.current) heatmapMaterialRef.current.dispose();
-      if (toolpathGroupRef.current) {
-        toolpathGroupRef.current.disposables.forEach((d) => {
-          d.geometry.dispose();
-          d.material.dispose();
-        });
-      }
-      nozzleDisposablesRef.current.forEach((d) => {
-        d.geometry.dispose();
-        d.material.dispose();
+      controls.dispose();
+      // Everything still attached to the scene: bed, grid, helpers, the model clone, calipers,
+      // plate copies, hole/text previews, toolpath lines and the nozzle.
+      scene.traverse((obj) => {
+        const node = obj as THREE.Mesh;
+        if (node.geometry) node.geometry.dispose();
+        const materials = Array.isArray(node.material) ? node.material : node.material ? [node.material] : [];
+        materials.forEach((m) => m.dispose());
       });
+      standardMaterial.dispose();
+      if (heatmapMaterialRef.current) {
+        heatmapMaterialRef.current.dispose();
+        heatmapMaterialRef.current = null;
+      }
+      // Drop refs to objects of the disposed scene so a remount (StrictMode, 2D/3D toggle) rebuilds them
+      toolpathGroupRef.current = null;
+      nozzleMeshRef.current = null;
+      nozzleDisposablesRef.current = [];
+      previewHoleMeshRef.current = null;
+      previewTextMeshRef.current = null;
+      placedMeshesRef.current.clear();
+      renderer.dispose();
       threeRefs.current = null;
     };
   }, [useFallback]);
@@ -1281,7 +1285,7 @@ export const ThreeViewport: React.FC<ThreeViewportProps> = ({
         isGenerating={isGenerating}
         telemetry={telemetry}
         progressPercent={generationProgress}
-        statusText={stageStatusText}
+        stageText={stageStatusText}
       />
 
       {/* Top Floating Badges & Action Toolbar */}
@@ -1519,11 +1523,11 @@ export const ThreeViewport: React.FC<ThreeViewportProps> = ({
       <MeshModifierDrawer
         isOpen={isModifierOpen}
         onClose={() => setIsModifierOpen(false)}
-        activeGeometry={activeGeometry}
-        dimensionsMm={liveDimensions}
+        baseGeometry={activeGeometry}
+        currentDimensions={liveDimensions}
         onApplyModifiedGeometry={handleApplyModifiedGeometry}
         onResetGeometry={handleResetGeometry}
-        onExportModifiedStl={handleExportModifiedStl}
+        onExportStl={handleExportModifiedStl}
         onUpdatePreviewHole={handleUpdatePreviewHole}
         onUpdatePreviewText={handleUpdatePreviewText}
         isModified={isModified}
@@ -1531,8 +1535,8 @@ export const ThreeViewport: React.FC<ThreeViewportProps> = ({
 
       {/* Printability Health Score Card */}
       <PrintabilityScoreCard
-        auditResult={auditResult}
-        isOpen={auditMode}
+        audit={auditResult}
+        isActive={auditMode}
         onClose={() => handleToggleAudit()}
         onAutoOrient={handleAutoOrient}
       />

@@ -6,17 +6,12 @@ import {
   CheckCircle2, 
   ShieldCheck, 
   Clock, 
-  Scale, 
   Layers, 
   Thermometer, 
-  Box, 
   Coins, 
   AlertCircle,
-  ExternalLink,
   Star,
-  Check
 } from 'lucide-react';
-import * as THREE from 'three';
 import { ThreeViewport } from './ThreeViewport';
 import { MarketplaceModel, AppSettings } from '../types';
 import { createProceduralGeometry } from '../utils/geometryGenerator';
@@ -42,12 +37,11 @@ export const ModelDetailModal: React.FC<ModelDetailModalProps> = ({
   const [purchaseStatus, setPurchaseStatus] = useState<'idle' | 'processing' | 'success' | 'error'>('idle');
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
 
-  if (!model) return null;
+  // Hooks must run on every render, so build the geometry before the early return
+  const geometryType = model?.geometryType || 'bracket';
+  const geometry = useMemo(() => createProceduralGeometry(geometryType), [geometryType]);
 
-  // Generate 3D geometry for this model
-  const geometry = useMemo(() => {
-    return createProceduralGeometry(model.geometryType || 'bracket');
-  }, [model.geometryType]);
+  if (!model) return null;
 
   // Fee calculation engine:
   // Listed Price, Buyer Total, Platform Fee Deducted (12%), Creator Payout (88%)
@@ -174,7 +168,7 @@ export const ModelDetailModal: React.FC<ModelDetailModalProps> = ({
                     {model.creator.name}
                   </span>
                   {model.creator.verified && (
-                    <ShieldCheck className="w-3.5 h-3.5 text-cyan-400" title="Verified Creator" />
+                    <ShieldCheck className="w-3.5 h-3.5 text-cyan-400" aria-label="Verified Creator" />
                   )}
                   <span className="text-xs text-amber-400 font-mono flex items-center gap-0.5 ml-auto">
                     <Star className="w-3 h-3 fill-amber-400 text-amber-400" />

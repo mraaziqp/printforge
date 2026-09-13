@@ -1,21 +1,16 @@
 import React, { useState, useMemo } from 'react';
 import { 
   Search, 
-  Filter, 
-  SlidersHorizontal, 
   Star, 
   Download, 
   ShieldCheck, 
   Clock, 
   Scale, 
   Box, 
-  ExternalLink,
   Eye,
-  Tag,
   ArrowUpDown,
-  CheckCircle2
 } from 'lucide-react';
-import { MarketplaceModel, FilamentType } from '../types';
+import { MarketplaceModel } from '../types';
 import { FILAMENT_SPECS } from '../mockData';
 
 interface MarketplaceViewProps {
@@ -38,7 +33,6 @@ type SortOption = 'trending' | 'price-asc' | 'price-desc' | 'downloads' | 'ratin
 export const MarketplaceView: React.FC<MarketplaceViewProps> = ({
   models,
   onSelectModel,
-  openUploadModal,
 }) => {
   const [searchQuery, setSearchQuery] = useState('');
   const [selectedCategory, setSelectedCategory] = useState<string>('All');

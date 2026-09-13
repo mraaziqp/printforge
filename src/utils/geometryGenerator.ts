@@ -1,5 +1,5 @@
 import * as THREE from 'three';
-import { FilamentType, SlicingParams, MeshMetrics } from '../types';
+import { SlicingParams, MeshMetrics } from '../types';
 import { FILAMENT_SPECS } from '../mockData';
 
 export function createProceduralGeometry(type: 'bracket' | 'mini' | 'dragon' | 'gear' | 'cylinder' | 'cube'): THREE.BufferGeometry {

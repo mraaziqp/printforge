@@ -5,7 +5,6 @@ import {
   Plus, 
   CreditCard, 
   CheckCircle2, 
-  Sparkles,
   ShieldCheck
 } from 'lucide-react';
 

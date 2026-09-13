@@ -3,7 +3,6 @@ import {
   Sparkles, 
   Cpu, 
   Layers, 
-  Sliders, 
   Download, 
   RefreshCw, 
   Clock, 
@@ -11,17 +10,10 @@ import {
   Coins, 
   Share2, 
   Terminal, 
-  Flame, 
   Zap, 
   CheckCircle2, 
   AlertTriangle,
   Play,
-  Maximize,
-  ArrowRight,
-  ChevronRight,
-  Compass,
-  AlertCircle,
-  HelpCircle,
   X,
   Code,
   Copy,
@@ -35,19 +27,33 @@ import {
   SlicingParams, 
   PromptStylePreset, 
   GenerationProgress, 
-  GenerationStage, 
   MeshMetrics, 
   MarketplaceModel, 
   AppSettings,
   PreloadedUploadDraft,
+  BridgeHealth,
   BridgeJobStatus,
   BridgeWebSocketMessage
 } from '../types';
 import { FILAMENT_SPECS } from '../mockData';
 import { createProceduralGeometry, calculateMeshMetrics } from '../utils/geometryGenerator';
 import { triggerStlDownload } from '../utils/stlExporter';
-import { parseStlBuffer } from '../utils/meshLoader';
-import { cacheMeshBinary, cacheSliceProfile } from '../utils/meshDatabase';
+import { cacheMeshBinary } from '../utils/meshDatabase';
+import {
+  BRIDGE_JOB_TIMEOUT_SEC,
+  BRIDGE_STATUS_STEP,
+  MESH_TARGET_SIZE_MM,
+  bridgeBaseUrl,
+  bridgeWebSocketUrl,
+  describeBridgeHealth,
+  describeTelemetry,
+  errorMessage,
+  fetchMeshFromUrl,
+  pingBridge,
+  resolveBridgeUrl,
+  submitBridgeJob,
+  telemetryFromStatus,
+} from '../utils/bridgeClient';
 
 interface AiStudioViewProps {
   settings: AppSettings;
@@ -114,17 +120,17 @@ export const AiStudioView: React.FC<AiStudioViewProps> = ({
   // Local relay endpoint
   const [endpointUrl, setEndpointUrl] = useState<string>(settings.localRelayUrl);
   const [isRelayTesting, setIsRelayTesting] = useState<boolean>(false);
-  const [relayPingStatus, setRelayPingStatus] = useState<'idle' | 'success' | 'fallback'>('idle');
 
   // Polling & Diagnostics State
-  const [currentPromptId, setCurrentPromptId] = useState<string | null>(null);
   const [pollingStep, setPollingStep] = useState<number>(0);
   const [bridgeError, setBridgeError] = useState<BridgeDiagnosticError | null>(null);
   const [showCodeSnippetModal, setShowCodeSnippetModal] = useState<boolean>(false);
   const [copiedCode, setCopiedCode] = useState<boolean>(false);
-  const pollingIntervalRef = useRef<any>(null);
+  const pollingIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const pollingStartTimeRef = useRef<number>(0);
   const wsRef = useRef<WebSocket | null>(null);
+  // prompt_id of the bridge job in flight; cleared once the socket or the poller settles it so they can't both finish it
+  const activeJobRef = useRef<string | null>(null);
   const [liveTelemetry, setLiveTelemetry] = useState<BridgeWebSocketMessage | null>(null);
 
   // Generation progress state
@@ -135,7 +141,7 @@ export const AiStudioView: React.FC<AiStudioViewProps> = ({
   });
   const [logs, setLogs] = useState<string[]>([
     '[INIT] Hardware Bridge Client initialized.',
-    '[READY] Select a prompt or connect local ComfyUI/TripoSR daemon.',
+    '[READY] Select a prompt, or start the local ComfyUI bridge (npm run bridge) for real generation.',
   ]);
 
   // Active 3D Geometry
@@ -158,50 +164,6 @@ export const AiStudioView: React.FC<AiStudioViewProps> = ({
     setLogs((prev) => [...prev.slice(-14), `[${timestamp}] ${msg}`]);
   };
 
-  // Clean up polling interval on unmount
-  useEffect(() => {
-    return () => {
-      if (pollingIntervalRef.current) {
-        clearInterval(pollingIntervalRef.current);
-      }
-    };
-  }, []);
-
-  // Ping test local relay endpoint
-  const handleTestRelay = async () => {
-    setIsRelayTesting(true);
-    addLog(`Pinging bridge endpoint: ${endpointUrl}...`);
-
-    try {
-      const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), 2000);
-
-      const res = await fetch(endpointUrl, {
-        method: 'GET',
-        headers: { Accept: 'application/json' },
-        signal: controller.signal,
-      }).catch(() => null);
-
-      clearTimeout(timeoutId);
-
-      if (res && (res.ok || res.status === 404 || res.status === 405)) {
-        setRelayPingStatus('success');
-        setSettings((prev) => ({ ...prev, isLocalRelayOnline: true }));
-        addLog(`[BRIDGE OK] Local hardware node acknowledged (HTTP ${res.status}).`);
-      } else {
-        setRelayPingStatus('fallback');
-        setSettings((prev) => ({ ...prev, isLocalRelayOnline: false }));
-        addLog(`[BRIDGE] No local daemon on ${endpointUrl}. Virtual engine fallback active.`);
-      }
-    } catch {
-      setRelayPingStatus('fallback');
-      setSettings((prev) => ({ ...prev, isLocalRelayOnline: false }));
-      addLog(`[BRIDGE] Endpoint unreachable. Using hardware simulator fallback.`);
-    } finally {
-      setIsRelayTesting(false);
-    }
-  };
-
   // Clear polling & websocket
   const stopPolling = () => {
     if (pollingIntervalRef.current) {
@@ -209,150 +171,250 @@ export const AiStudioView: React.FC<AiStudioViewProps> = ({
       pollingIntervalRef.current = null;
     }
     if (wsRef.current) {
-      try {
-        wsRef.current.close();
-      } catch {}
+      const ws = wsRef.current;
       wsRef.current = null;
+      ws.onmessage = null;
+      ws.onerror = null;
+      ws.onclose = null;
+      try {
+        ws.close();
+      } catch {}
     }
   };
 
-  // Helper to derive WebSocket URL from endpoint
-  const getWebSocketUrl = (httpUrl: string): string => {
+  // Clean up polling interval & socket on unmount
+  useEffect(() => {
+    return () => {
+      activeJobRef.current = null;
+      stopPolling();
+    };
+  }, []);
+
+  const applyBridgeHealth = (health: BridgeHealth) => {
+    setSettings((prev) => ({ ...prev, isLocalRelayOnline: true }));
+    addLog(`[BRIDGE OK] ${describeBridgeHealth(health)}`);
+    if (!health.comfyui.reachable) {
+      addLog(`[WARN] ComfyUI is not reachable at ${health.comfyui.url}. Start ComfyUI before generating.`);
+    }
+    if (health.workflow_error) addLog(`[WARN] ${health.workflow_error}`);
+    health.missing_nodes.forEach((node) => addLog(`[WARN] ComfyUI node not installed: ${node}`));
+    health.missing_models.forEach((model) => addLog(`[WARN] Missing model: ${model}`));
+  };
+
+  // Watch the bridge continuously so starting or stopping the local stack is picked up without pressing Ping.
+  // Only changes in its state are logged.
+  const bridgeStateRef = useRef<string | null>(null);
+  useEffect(() => {
+    let cancelled = false;
+    const check = () => {
+      pingBridge(settings.localRelayUrl)
+        .then((health) => {
+          if (cancelled) return;
+          const state = `online:${health.comfyui.reachable}:${health.missing_models.length + health.missing_nodes.length}`;
+          if (bridgeStateRef.current !== state) applyBridgeHealth(health);
+          bridgeStateRef.current = state;
+        })
+        .catch(() => {
+          if (cancelled || activeJobRef.current) return;
+          if (bridgeStateRef.current?.startsWith('online')) {
+            addLog('[BRIDGE] Lost the local bridge. Using the simulator until it is back.');
+          }
+          bridgeStateRef.current = 'offline';
+          setSettings((prev) => (prev.isLocalRelayOnline ? { ...prev, isLocalRelayOnline: false } : prev));
+        });
+    };
+    check();
+    const timer = setInterval(check, 10000);
+    return () => {
+      cancelled = true;
+      clearInterval(timer);
+    };
+  }, [settings.localRelayUrl]);
+
+  // Ping test local relay endpoint
+  const handleTestRelay = async () => {
+    setIsRelayTesting(true);
+    addLog(`Pinging bridge: ${bridgeBaseUrl(endpointUrl)}/health ...`);
     try {
-      const url = new URL(httpUrl);
-      const wsProtocol = url.protocol === 'https:' ? 'wss:' : 'ws:';
-      return `${wsProtocol}//${url.host}/ws`;
-    } catch {
-      return 'ws://localhost:8000/ws';
+      applyBridgeHealth(await pingBridge(endpointUrl));
+    } catch (err) {
+      setSettings((prev) => ({ ...prev, isLocalRelayOnline: false }));
+      addLog(`[BRIDGE] ${errorMessage(err)}. Virtual engine fallback active.`);
+    } finally {
+      setIsRelayTesting(false);
     }
   };
 
-  // HTTP Long-Polling Fallback Loop
-  const startHttpPolling = (
-    statusUrl: string,
-    promptId: string,
-    targetType: 'bracket' | 'mini' | 'dragon' | 'gear'
-  ) => {
+  const failBridgeJob = (reason: string, details: string[]) => {
+    activeJobRef.current = null;
     stopPolling();
-    addLog(`[BRIDGE] Initiating HTTP polling against ${statusUrl}...`);
+    setLiveTelemetry(null);
+    setBridgeError({ endpoint: bridgeBaseUrl(endpointUrl), reason, details });
+    setGeneration({
+      stage: 'error',
+      progressPercent: 0,
+      statusText: 'Bridge Generation Failed',
+      stepDetails: reason,
+    });
+    addLog(`[ERROR] ${reason}`);
+  };
 
-    const pollInterval = setInterval(async () => {
+  const applyBridgeProgress = (
+    status: BridgeJobStatus['status'],
+    percent: number,
+    statusText: string,
+    details?: string
+  ) => {
+    const step = BRIDGE_STATUS_STEP[status] || 1;
+    setPollingStep(step);
+    setGeneration({
+      stage: status === 'queued' ? 'queued' : status === 'diffusing' ? 'comfyui_sdxl' : 'meshing',
+      progressPercent: Math.round(percent),
+      statusText: `Stage ${step}: ${statusText}`,
+      stepDetails: details,
+    });
+  };
+
+  const completeBridgeJob = async (promptId: string, meshUrl?: string | null) => {
+    if (activeJobRef.current !== promptId) return;
+    activeJobRef.current = null;
+    stopPolling();
+
+    if (!meshUrl) {
+      failBridgeJob('ComfyUI finished but reported no mesh file', [
+        'Make sure the workflow ends in a SaveGLB node titled PF_SAVE_MESH',
+      ]);
+      return;
+    }
+
+    const url = resolveBridgeUrl(endpointUrl, meshUrl);
+    setPollingStep(4);
+    setGeneration({
+      stage: 'slicing',
+      progressPercent: 97,
+      statusText: 'Stage 4: Downloading generated mesh...',
+      stepDetails: `GET ${url}`,
+    });
+
+    try {
+      const loaded = await fetchMeshFromUrl(url);
+      setActiveGeometry(loaded.geometry);
+      void cacheMeshBinary(promptId, loaded.fileName, loaded.buffer, loaded.triangleCount, slicingParams.filament, {
+        prompt,
+        seed,
+        source: 'comfyui-bridge',
+      });
+      setLiveTelemetry(null);
+      setGeneration({
+        stage: 'completed',
+        progressPercent: 100,
+        statusText: 'Generation Complete! Real 3D model loaded.',
+        stepDetails: `${loaded.fileName} • ${loaded.triangleCount.toLocaleString()} triangles • scaled to ${MESH_TARGET_SIZE_MM}mm. Export .STL to print.`,
+      });
+      addLog(
+        `[SUCCESS] Loaded ${loaded.format.toUpperCase()} from ComfyUI: ${loaded.triangleCount.toLocaleString()} triangles.`
+      );
+    } catch (err) {
+      failBridgeJob(`Mesh download failed: ${errorMessage(err)}`, [
+        `Try opening ${url} directly`,
+        'Check the bridge terminal for errors',
+      ]);
+    }
+  };
+
+  const connectTelemetrySocket = (promptId: string) => {
+    const wsUrl = bridgeWebSocketUrl(endpointUrl);
+    let ws: WebSocket;
+    try {
+      ws = new WebSocket(wsUrl);
+    } catch {
+      addLog('[WS] Telemetry socket could not be opened; using HTTP polling only.');
+      return;
+    }
+    wsRef.current = ws;
+
+    ws.onopen = () => {
+      ws.send(JSON.stringify({ action: 'subscribe', prompt_id: promptId }));
+      addLog(`[WS] Live telemetry connected (${wsUrl}).`);
+    };
+
+    ws.onmessage = (event) => {
+      let data: BridgeWebSocketMessage;
+      try {
+        data = JSON.parse(event.data);
+      } catch {
+        return;
+      }
+      if (data.promptId !== promptId || activeJobRef.current !== promptId) return;
+
+      if (data.type === 'complete') {
+        void completeBridgeJob(promptId, data.meshUrl);
+        return;
+      }
+      if (data.type === 'error') {
+        failBridgeJob(data.error || 'ComfyUI reported an execution error', [
+          'Check the ComfyUI console for the full traceback',
+          'RTX 3060 Ti (8GB): close other GPU-heavy apps if you hit CUDA out-of-memory',
+          'Click Ping to list missing models or nodes',
+        ]);
+        return;
+      }
+      setLiveTelemetry({ ...data, connectionType: 'websocket' });
+      applyBridgeProgress(data.status ?? 'diffusing', data.percentage ?? 0, data.statusText ?? 'Generating', describeTelemetry(data));
+    };
+
+    ws.onerror = () => addLog('[WS] Telemetry socket unavailable; continuing with HTTP polling.');
+    ws.onclose = () => {
+      if (wsRef.current === ws) wsRef.current = null;
+    };
+  };
+
+  // /status polling is the source of truth for completion; the socket only makes progress live
+  const startStatusPolling = (promptId: string) => {
+    if (pollingIntervalRef.current) clearInterval(pollingIntervalRef.current);
+    const statusUrl = `${bridgeBaseUrl(endpointUrl)}/status/${encodeURIComponent(promptId)}`;
+    let inFlight = false;
+
+    pollingIntervalRef.current = setInterval(async () => {
+      if (activeJobRef.current !== promptId || inFlight) return;
+
       const elapsedSec = Math.round((Date.now() - pollingStartTimeRef.current) / 1000);
-
-      // Check 120s timeout limit
-      if (elapsedSec > 120) {
-        stopPolling();
-        setLiveTelemetry(null);
-        setBridgeError({
-          endpoint: statusUrl,
-          reason: 'Bridge Polling Timeout (120 seconds exceeded)',
-          details: [
-            'Local GPU pipeline took longer than 120 seconds to return a finished mesh',
-            'Check terminal logs of your local worker for CUDA out-of-memory or stuck queues',
-            'You can switch to Simulation Mode to inspect a simulated model immediately',
-          ],
-        });
-        setGeneration({
-          stage: 'error',
-          progressPercent: 0,
-          statusText: 'Polling Timed Out (120s)',
-          stepDetails: 'Worker did not return mesh within 120s threshold.',
-        });
+      if (elapsedSec > BRIDGE_JOB_TIMEOUT_SEC) {
+        failBridgeJob(`Generation timed out after ${Math.round(BRIDGE_JOB_TIMEOUT_SEC / 60)} minutes`, [
+          'Check the ComfyUI console for a stuck queue or CUDA out-of-memory',
+          `The job may still finish in ComfyUI (prompt_id ${promptId})`,
+        ]);
         return;
       }
 
+      inFlight = true;
       try {
-        const pollRes = await fetch(statusUrl, {
-          method: 'GET',
-          headers: { Accept: 'application/json' },
-        });
-
-        if (!pollRes.ok) {
-          addLog(`[POLL] Status HTTP ${pollRes.status}, retrying in 2s...`);
+        const res = await fetch(statusUrl, { headers: { Accept: 'application/json' } });
+        if (!res.ok) {
+          if (res.status !== 404) addLog(`[POLL] Status HTTP ${res.status}, retrying...`);
           return;
         }
+        const status: BridgeJobStatus = await res.json();
+        if (activeJobRef.current !== promptId) return;
 
-        const statusData: BridgeJobStatus = await pollRes.json();
-        addLog(`[POLL ${elapsedSec}s] Status: ${statusData.status || 'processing'} (${statusData.progress_pct || 0}%)`);
-
-        // Update live telemetry pill
-        setLiveTelemetry({
-          type: 'progress',
-          step: Math.round(((statusData.progress_pct || 20) / 100) * 25),
-          totalSteps: 25,
-          stage: statusData.status || 'diffusion',
-          percentage: statusData.progress_pct || 30,
-          samplerName: 'KSampler (Euler a)',
-          vramUsedMb: 5420,
-          gpuTempC: 64,
-          iterationRate: 7.2,
-          etaSeconds: Math.max(1, Math.round(((100 - (statusData.progress_pct || 30)) / 100) * 20)),
-          connectionType: 'http_poll',
-        });
-
-        // Stage 2: Diffusing image on RTX 3060 Ti...
-        if (statusData.status === 'diffusing' || (statusData.progress_pct && statusData.progress_pct < 50)) {
-          setPollingStep(2);
-          setGeneration({
-            stage: 'comfyui_sdxl',
-            progressPercent: statusData.progress_pct || 42,
-            statusText: 'Stage 2: Diffusing image on RTX 3060 Ti...',
-            stepDetails: statusData.stage_name || 'Generating multiview projections...',
-          });
+        if (status.status === 'completed') {
+          await completeBridgeJob(promptId, status.mesh_url);
+        } else if (status.status === 'failed') {
+          failBridgeJob(status.error || 'ComfyUI reported an execution error', [
+            'Check the ComfyUI console for the full traceback',
+            'Click Ping to list missing models or nodes',
+          ]);
+        } else if (wsRef.current?.readyState !== WebSocket.OPEN) {
+          const telemetry = telemetryFromStatus(status);
+          setLiveTelemetry(telemetry);
+          applyBridgeProgress(status.status, status.progress_pct, status.stage_name, describeTelemetry(telemetry));
         }
-        // Stage 3: Synthesizing 3D mesh (SF3D / TripoSR)...
-        else if (statusData.status === 'meshing' || (statusData.progress_pct && statusData.progress_pct < 85)) {
-          setPollingStep(3);
-          setGeneration({
-            stage: 'meshing',
-            progressPercent: statusData.progress_pct || 75,
-            statusText: 'Stage 3: Synthesizing 3D mesh (SF3D / TripoSR)...',
-            stepDetails: statusData.stage_name || 'Extracting watertight signed distance field...',
-          });
-        }
-        // Stage 4: Downloading generated .STL / .GLB asset...
-        else if (statusData.status === 'exporting' || statusData.status === 'completed' || (statusData.progress_pct && statusData.progress_pct >= 90)) {
-          setPollingStep(4);
-          setGeneration({
-            stage: 'slicing',
-            progressPercent: 96,
-            statusText: 'Stage 4: Downloading generated .STL / .GLB asset...',
-            stepDetails: 'Fetching output mesh blob from local bridge...',
-          });
-
-          if (statusData.mesh_url) {
-            try {
-              const meshRes = await fetch(statusData.mesh_url);
-              const arrayBuffer = await meshRes.arrayBuffer();
-              const parsed = parseStlBuffer(arrayBuffer);
-              setActiveGeometry(parsed.geometry);
-              addLog('[SUCCESS] Real binary STL asset loaded into ThreeViewport!');
-            } catch (err) {
-              console.warn('Failed to parse mesh blob from bridge, loading fallback geometry:', err);
-              const newGeo = createProceduralGeometry(targetType);
-              setActiveGeometry(newGeo);
-            }
-          } else {
-            const newGeo = createProceduralGeometry(targetType);
-            setActiveGeometry(newGeo);
-          }
-
-          stopPolling();
-          setLiveTelemetry(null);
-          setGeneration({
-            stage: 'completed',
-            progressPercent: 100,
-            statusText: 'Generation Complete! Real 3D Model Loaded.',
-            stepDetails: 'Asset compiled by local hardware bridge and mounted to bed.',
-          });
-          addLog('[SUCCESS] Local bridge generation completed successfully.');
-        }
-      } catch (pollErr: any) {
-        console.warn('Error during status polling:', pollErr);
+      } catch {
+        // Bridge briefly unreachable; keep polling until the timeout
+      } finally {
+        inFlight = false;
       }
     }, 2000);
-
-    pollingIntervalRef.current = pollInterval;
   };
 
   // Execute Simulated 4-Stage Stepper with Live Holographic Telemetry
@@ -481,192 +543,50 @@ export const AiStudioView: React.FC<AiStudioViewProps> = ({
     addLog('[SUCCESS] 3D mesh compiled and mounted to print bed.');
   };
 
-  // Real Hardware Bridge POST & WebSocket Engine with HTTP Fallback
+  // Real hardware bridge: queue the ComfyUI workflow, stream telemetry over WebSocket, poll /status for the result
   const startRealBridgeGeneration = async (targetType: 'bracket' | 'mini' | 'dragon' | 'gear') => {
     setBridgeError(null);
+    activeJobRef.current = null;
     stopPolling();
     pollingStartTimeRef.current = Date.now();
-
-    // Stage 1: Submitting to local ComfyUI queue...
     setPollingStep(1);
-    setLiveTelemetry({
-      type: 'progress',
-      step: 1,
-      totalSteps: 25,
-      stage: 'queued',
-      percentage: 10,
-      samplerName: 'Euler Ancestral',
-      vramUsedMb: 5120,
-      gpuTempC: 60,
-      iterationRate: 7.2,
-      etaSeconds: 20,
-      connectionType: 'websocket',
-    });
+    setLiveTelemetry(null);
+
+    const base = bridgeBaseUrl(endpointUrl);
     setGeneration({
       stage: 'queued',
-      progressPercent: 15,
-      statusText: 'Stage 1: Submitting to local ComfyUI queue...',
-      stepDetails: `POST ${endpointUrl}`,
+      progressPercent: 2,
+      statusText: 'Stage 1: Submitting workflow to local ComfyUI...',
+      stepDetails: `POST ${base}/generate`,
     });
-    addLog(`[BRIDGE] Dispatching POST request to ${endpointUrl}...`);
+    addLog(`[BRIDGE] Dispatching POST ${base}/generate ...`);
 
     let promptId: string;
     try {
-      const controller = new AbortController();
-      const initialTimeout = setTimeout(() => controller.abort(), 6000);
-
-      const postResponse = await fetch(endpointUrl, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Accept: 'application/json',
-        },
-        body: JSON.stringify({
-          prompt,
-          seed,
-          slicingParams,
-          geometryType: targetType,
-        }),
-        signal: controller.signal,
+      promptId = await submitBridgeJob(endpointUrl, {
+        prompt,
+        seed,
+        infill: slicingParams.infill,
+        filament: slicingParams.filament,
+        layer_height: Number(slicingParams.layerHeight),
+        slicingParams,
+        geometryType: targetType,
       });
-
-      clearTimeout(initialTimeout);
-
-      if (!postResponse.ok) {
-        throw new Error(`Endpoint returned HTTP ${postResponse.status}: ${postResponse.statusText}`);
-      }
-
-      const postData = await postResponse.json();
-      promptId = postData.prompt_id || postData.job_id || postData.id || `prompt_${Date.now()}`;
-      setCurrentPromptId(promptId);
-      addLog(`[BRIDGE] Job accepted! prompt_id=${promptId}. Attempting WebSocket stream...`);
-    } catch (err: any) {
-      console.warn('Real bridge POST failed:', err);
-      setBridgeError({
-        endpoint: endpointUrl,
-        reason: err.message || 'Connection refused / CORS error',
-        details: [
-          'Verify your local bridge server is running (e.g., python printforge_bridge.py)',
-          'Ensure CORS is allowed: Access-Control-Allow-Origin: *',
-          'If using ngrok or Cloudflare tunnels, ensure the public URL is valid and reachable',
-          'Check GPU VRAM: RTX 3060 Ti requires at least 6GB free memory for neural 3D synthesis',
-        ],
-      });
-      addLog(`[ERROR] Bridge connection failed: ${err.message || 'Check diagnostics below'}`);
-      setLiveTelemetry(null);
-      setGeneration({
-        stage: 'error',
-        progressPercent: 0,
-        statusText: 'Bridge Connection Failed',
-        stepDetails: 'See diagnostics card below for troubleshooting options.',
-      });
+    } catch (err) {
+      failBridgeJob(errorMessage(err), [
+        'Start the bridge in a terminal: npm run bridge',
+        'Start ComfyUI (Comfy Desktop) so it listens on http://127.0.0.1:8188',
+        'Click Ping to list missing models or custom nodes',
+        'Or switch to Simulation Mode to preview without the GPU pipeline',
+      ]);
       return;
     }
 
-    // Determine status endpoint URL
-    let statusUrl = endpointUrl;
-    if (endpointUrl.endsWith('/generate')) {
-      statusUrl = endpointUrl.replace(/\/generate\/?$/, '') + `/status/${promptId}`;
-    } else {
-      statusUrl = `${endpointUrl.replace(/\/$/, '')}/status/${promptId}`;
-    }
-
-    // Attempt WebSocket connection first for real-time telemetry streaming
-    let wsConnected = false;
-    try {
-      const wsUrl = getWebSocketUrl(endpointUrl);
-      addLog(`[WS] Attempting live telemetry on ${wsUrl}...`);
-      const ws = new WebSocket(wsUrl);
-      wsRef.current = ws;
-
-      const wsTimeout = setTimeout(() => {
-        if (!wsConnected) {
-          addLog('[WS] Handshake timeout (2s). Gracefully falling back to HTTP long polling.');
-          try {
-            ws.close();
-          } catch {}
-          startHttpPolling(statusUrl, promptId, targetType);
-        }
-      }, 2000);
-
-      ws.onopen = () => {
-        clearTimeout(wsTimeout);
-        wsConnected = true;
-        addLog('[WS] Live WebSocket connected! Streaming hardware telemetry.');
-        ws.send(
-          JSON.stringify({
-            action: 'subscribe',
-            prompt_id: promptId,
-            client_id: 'printforge_client',
-          })
-        );
-      };
-
-      ws.onmessage = async (event) => {
-        try {
-          const data: BridgeWebSocketMessage = JSON.parse(event.data);
-          setLiveTelemetry({ ...data, connectionType: 'websocket' });
-
-          if (data.percentage !== undefined) {
-            setGeneration((prev) => ({
-              ...prev,
-              progressPercent: data.percentage,
-              statusText: `Live ComfyUI: Step ${data.step || 0}/${data.totalSteps || 25} (${data.stage || 'generating'})`,
-              stepDetails: `${data.samplerName || 'KSampler'} • ${data.iterationRate || 7.2} it/s • VRAM: ${Math.round((data.vramUsedMb || 5000) / 1024)}GB`,
-            }));
-          }
-
-          if (data.stage === 'diffusion') setPollingStep(2);
-          else if (data.stage === 'meshing') setPollingStep(3);
-          else if (data.stage === 'download' || data.stage === 'completed') setPollingStep(4);
-
-          if (data.stage === 'completed' || data.meshUrl) {
-            stopPolling();
-            if (data.meshUrl) {
-              try {
-                const meshRes = await fetch(data.meshUrl);
-                const arrayBuffer = await meshRes.arrayBuffer();
-                const parsed = parseStlBuffer(arrayBuffer);
-                setActiveGeometry(parsed.geometry);
-                addLog('[SUCCESS] Real binary STL asset received via WebSocket!');
-              } catch {
-                setActiveGeometry(createProceduralGeometry(targetType));
-              }
-            } else {
-              setActiveGeometry(createProceduralGeometry(targetType));
-            }
-            setLiveTelemetry(null);
-            setGeneration({
-              stage: 'completed',
-              progressPercent: 100,
-              statusText: 'Generation Complete! Real 3D Model Loaded.',
-              stepDetails: 'Asset compiled by local hardware bridge and mounted to bed.',
-            });
-            addLog('[SUCCESS] Local bridge generation completed via WebSocket.');
-          }
-        } catch (e) {
-          console.warn('WS message parse error:', e);
-        }
-      };
-
-      ws.onerror = () => {
-        if (!wsConnected) {
-          clearTimeout(wsTimeout);
-          addLog('[WS] Connection failed. Gracefully falling back to HTTP long polling.');
-          startHttpPolling(statusUrl, promptId, targetType);
-        }
-      };
-
-      ws.onclose = () => {
-        if (wsConnected && generation.stage !== 'completed') {
-          addLog('[WS] Connection closed prematurely. Continuing via HTTP polling.');
-          startHttpPolling(statusUrl, promptId, targetType);
-        }
-      };
-    } catch (wsErr) {
-      addLog('[WS] WebSocket initialization failed. Falling back to HTTP polling.');
-      startHttpPolling(statusUrl, promptId, targetType);
-    }
+    activeJobRef.current = promptId;
+    addLog(`[BRIDGE] Job accepted by ComfyUI: prompt_id=${promptId}`);
+    applyBridgeProgress('queued', 4, 'Queued in ComfyUI', `prompt_id ${promptId}`);
+    connectTelemetrySocket(promptId);
+    startStatusPolling(promptId);
   };
 
   // Main Generation Trigger
@@ -778,7 +698,7 @@ export const AiStudioView: React.FC<AiStudioViewProps> = ({
   };
 
   const copySnippet = () => {
-    navigator.clipboard.writeText(PYTHON_BRIDGE_SNIPPET);
+    navigator.clipboard.writeText(BRIDGE_SETUP_SNIPPET);
     setCopiedCode(true);
     setTimeout(() => setCopiedCode(false), 1800);
   };
@@ -1383,12 +1303,12 @@ export const AiStudioView: React.FC<AiStudioViewProps> = ({
             </div>
 
             <p className="text-xs text-slate-300 font-mono">
-              Run this 20-line FastAPI script alongside your local ComfyUI or TripoSR instance to connect PrintForge directly to your GPU:
+              PrintForge reaches your GPU through <code className="text-cyan-300">server/bridge.py</code>, a FastAPI relay that queues <code className="text-cyan-300">server/workflow_api.json</code> in ComfyUI and streams progress back here:
             </p>
 
             <div className="relative">
               <pre className="p-3.5 bg-slate-950 rounded-xl border border-slate-800 font-mono text-[11px] text-emerald-300 overflow-x-auto max-h-64">
-                {PYTHON_BRIDGE_SNIPPET}
+                {BRIDGE_SETUP_SNIPPET}
               </pre>
               <button
                 type="button"
@@ -1401,7 +1321,7 @@ export const AiStudioView: React.FC<AiStudioViewProps> = ({
             </div>
 
             <div className="text-[11px] font-mono text-slate-400">
-              Run: <code className="text-cyan-300 bg-slate-950 px-1.5 py-0.5 rounded">pip install fastapi uvicorn && python bridge.py</code>
+              Health check: <code className="text-cyan-300 bg-slate-950 px-1.5 py-0.5 rounded">{bridgeBaseUrl(endpointUrl)}/health</code>
             </div>
 
             <div className="flex justify-end pt-2 border-t border-slate-800">
@@ -1420,63 +1340,19 @@ export const AiStudioView: React.FC<AiStudioViewProps> = ({
   );
 };
 
-const PYTHON_BRIDGE_SNIPPET = `# printforge_bridge.py
-from fastapi import FastAPI, WebSocket
-from fastapi.middleware.cors import CORSMiddleware
-import asyncio
-import time
+const BRIDGE_SETUP_SNIPPET = `# 1. One-time bridge setup (run in the PrintForge folder)
+npm run bridge:setup
 
-app = FastAPI()
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+# 2. Start ComfyUI (Comfy Desktop) -> http://127.0.0.1:8188
 
-JOBS = {}
+# 3. Start the bridge and keep this terminal open
+npm run bridge            # -> http://127.0.0.1:8000
 
-@app.post("/generate")
-def generate_endpoint(payload: dict):
-    prompt_id = f"job_{int(time.time())}"
-    JOBS[prompt_id] = {"status": "queued", "progress_pct": 10, "start": time.time()}
-    return {"prompt_id": prompt_id, "status": "queued"}
+# 4. In a second terminal, start the web app
+npm run dev               # -> http://localhost:5173
 
-@app.websocket("/ws")
-async def websocket_telemetry(websocket: WebSocket):
-    """Real-time telemetry stream directly to PrintForge 3D viewport"""
-    await websocket.accept()
-    # Streams 25 KSampler steps + live GPU metrics
-    for step in range(1, 26):
-        pct = int((step / 25) * 100)
-        stage = "diffusion" if step < 18 else ("meshing" if step < 24 else "completed")
-        await websocket.send_json({
-            "type": "progress",
-            "step": step,
-            "totalSteps": 25,
-            "stage": stage,
-            "percentage": pct,
-            "samplerName": "KSampler (Euler a)",
-            "vramUsedMb": 5420 + step * 12,
-            "gpuTempC": 64,
-            "iterationRate": 7.4,
-            "etaSeconds": max(0, int((25 - step) * 0.45)),
-            "connectionType": "websocket"
-        })
-        await asyncio.sleep(0.35)
-
-@app.get("/status/{prompt_id}")
-def status_endpoint(prompt_id: str):
-    job = JOBS.get(prompt_id, {"status": "completed", "progress_pct": 100})
-    elapsed = time.time() - job.get("start", time.time())
-    if elapsed < 2:
-        return {"status": "diffusing", "progress_pct": 40, "stage_name": "Diffusing on RTX 3060 Ti"}
-    elif elapsed < 5:
-        return {"status": "meshing", "progress_pct": 75, "stage_name": "TripoSR mesh synthesis"}
-    else:
-        return {"status": "completed", "progress_pct": 100, "stage_name": "Finished"}
-
-if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+# Models the default workflow (server/workflow_api.json) needs:
+#   ComfyUI/models/checkpoints/sd_xl_base_1.0.safetensors
+#   ComfyUI/models/checkpoints/hunyuan3d-dit-v2_fp16.safetensors
+#   ComfyUI/models/background_removal/birefnet.safetensors
 `;

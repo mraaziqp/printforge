@@ -1,0 +1,137 @@
+{
+  "1": {
+    "class_type": "CheckpointLoaderSimple",
+    "_meta": { "title": "SDXL Checkpoint" },
+    "inputs": { "ckpt_name": "sd_xl_base_1.0.safetensors" }
+  },
+  "2": {
+    "class_type": "CLIPTextEncode",
+    "_meta": { "title": "PF_PROMPT" },
+    "inputs": {
+      "text": "{{prompt}}, single isolated object, centered, entire object in frame, 3d printable sculpture, solid matte grey material, studio product photo, plain white background, soft even lighting, sharp focus, highly detailed",
+      "clip": ["1", 1]
+    }
+  },
+  "3": {
+    "class_type": "CLIPTextEncode",
+    "_meta": { "title": "PF_NEGATIVE" },
+    "inputs": {
+      "text": "multiple objects, cropped, cut off, out of frame, text, watermark, logo, busy background, scenery, floor, harsh shadows, reflections, transparent, glass, blurry, low quality, deformed",
+      "clip": ["1", 1]
+    }
+  },
+  "4": {
+    "class_type": "EmptyLatentImage",
+    "_meta": { "title": "SDXL Latent 1024" },
+    "inputs": { "width": 1024, "height": 1024, "batch_size": 1 }
+  },
+  "5": {
+    "class_type": "KSampler",
+    "_meta": { "title": "PF_IMAGE_SAMPLER" },
+    "inputs": {
+      "seed": 428901,
+      "steps": 25,
+      "cfg": 7.0,
+      "sampler_name": "dpmpp_2m",
+      "scheduler": "karras",
+      "denoise": 1.0,
+      "model": ["1", 0],
+      "positive": ["2", 0],
+      "negative": ["3", 0],
+      "latent_image": ["4", 0]
+    }
+  },
+  "6": {
+    "class_type": "VAEDecode",
+    "_meta": { "title": "Decode Reference Image" },
+    "inputs": { "samples": ["5", 0], "vae": ["1", 2] }
+  },
+  "7": {
+    "class_type": "LoadBackgroundRemovalModel",
+    "_meta": { "title": "BiRefNet Loader" },
+    "inputs": { "bg_removal_name": "birefnet.safetensors" }
+  },
+  "8": {
+    "class_type": "RemoveBackground",
+    "_meta": { "title": "Remove Background" },
+    "inputs": { "bg_removal_model": ["7", 0], "image": ["6", 0] }
+  },
+  "9": {
+    "class_type": "EmptyImage",
+    "_meta": { "title": "White Backdrop" },
+    "inputs": { "width": 1024, "height": 1024, "batch_size": 1, "color": 16777215 }
+  },
+  "10": {
+    "class_type": "ImageCompositeMasked",
+    "_meta": { "title": "Subject On White" },
+    "inputs": {
+      "destination": ["9", 0],
+      "source": ["6", 0],
+      "x": 0,
+      "y": 0,
+      "resize_source": false,
+      "mask": ["8", 0]
+    }
+  },
+  "11": {
+    "class_type": "ImageOnlyCheckpointLoader",
+    "_meta": { "title": "Hunyuan3D-2 Checkpoint" },
+    "inputs": { "ckpt_name": "hunyuan3d-dit-v2_fp16.safetensors" }
+  },
+  "12": {
+    "class_type": "ModelSamplingAuraFlow",
+    "_meta": { "title": "Hunyuan3D Sampling Shift" },
+    "inputs": { "shift": 1.0, "model": ["11", 0] }
+  },
+  "13": {
+    "class_type": "CLIPVisionEncode",
+    "_meta": { "title": "Encode Reference" },
+    "inputs": { "crop": "none", "clip_vision": ["11", 1], "image": ["10", 0] }
+  },
+  "14": {
+    "class_type": "Hunyuan3Dv2Conditioning",
+    "_meta": { "title": "Hunyuan3D Conditioning" },
+    "inputs": { "clip_vision_output": ["13", 0] }
+  },
+  "15": {
+    "class_type": "EmptyLatentHunyuan3Dv2",
+    "_meta": { "title": "Hunyuan3D Latent" },
+    "inputs": { "resolution": 3072, "batch_size": 1 }
+  },
+  "16": {
+    "class_type": "KSampler",
+    "_meta": { "title": "PF_MESH_SAMPLER" },
+    "inputs": {
+      "seed": 428901,
+      "steps": 20,
+      "cfg": 8.0,
+      "sampler_name": "euler",
+      "scheduler": "normal",
+      "denoise": 1.0,
+      "model": ["12", 0],
+      "positive": ["14", 0],
+      "negative": ["14", 1],
+      "latent_image": ["15", 0]
+    }
+  },
+  "17": {
+    "class_type": "VAEDecodeHunyuan3D",
+    "_meta": { "title": "Decode Voxels" },
+    "inputs": { "num_chunks": 8000, "octree_resolution": 256, "samples": ["16", 0], "vae": ["11", 2] }
+  },
+  "18": {
+    "class_type": "VoxelToMesh",
+    "_meta": { "title": "Voxels To Mesh" },
+    "inputs": { "algorithm": "surface net", "threshold": 0.6, "voxel": ["17", 0] }
+  },
+  "19": {
+    "class_type": "SaveGLB",
+    "_meta": { "title": "PF_SAVE_MESH" },
+    "inputs": { "filename_prefix": "printforge/model", "mesh": ["18", 0] }
+  },
+  "20": {
+    "class_type": "SaveImage",
+    "_meta": { "title": "PF_SAVE_PREVIEW" },
+    "inputs": { "filename_prefix": "printforge/model_ref", "images": ["10", 0] }
+  }
+}

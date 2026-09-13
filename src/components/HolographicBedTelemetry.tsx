@@ -1,5 +1,5 @@
 import React from 'react';
-import { Cpu, Zap, Flame, Clock, Radio, Layers, Activity } from 'lucide-react';
+import { Cpu, Zap, Flame, Clock, Radio } from 'lucide-react';
 import { BridgeWebSocketMessage } from '../types';
 
 interface HolographicBedTelemetryProps {
@@ -19,13 +19,12 @@ export const HolographicBedTelemetry: React.FC<HolographicBedTelemetryProps> = (
 
   const currentStep = telemetry?.step || Math.max(1, Math.round((progressPercent / 100) * 25));
   const totalSteps = telemetry?.totalSteps || 25;
-  const samplerName = telemetry?.samplerName || 'KSampler (Euler a)';
-  const vramMb = telemetry?.vramUsedMb || 5420;
-  const gpuTemp = telemetry?.gpuTempC || 64;
-  const itRate = telemetry?.iterationRate || 7.2;
-  const etaSec = telemetry?.etaSeconds !== undefined 
-    ? telemetry.etaSeconds 
-    : Math.max(1, Math.round(((100 - progressPercent) / 100) * 18));
+  const samplerName = telemetry?.samplerName || 'ComfyUI';
+  // Show only readings the bridge actually reported; missing values render as "--"
+  const vramMb = telemetry?.vramUsedMb;
+  const gpuTemp = telemetry?.gpuTempC;
+  const itRate = telemetry?.iterationRate;
+  const etaSec = telemetry?.etaSeconds;
 
   const radius = 54;
   const circumference = 2 * Math.PI * radius;
@@ -99,7 +98,7 @@ export const HolographicBedTelemetry: React.FC<HolographicBedTelemetryProps> = (
           {/* ETA */}
           <div className="flex items-center gap-1 text-cyan-300">
             <Clock className="w-3.5 h-3.5 text-cyan-400" />
-            <span>ETA {etaSec < 10 ? `0${etaSec}` : etaSec}s</span>
+            <span>ETA {etaSec == null ? '--' : `${etaSec < 10 ? `0${etaSec}` : etaSec}s`}</span>
           </div>
 
           <span className="text-slate-700">|</span>
@@ -107,7 +106,7 @@ export const HolographicBedTelemetry: React.FC<HolographicBedTelemetryProps> = (
           {/* Speed */}
           <div className="flex items-center gap-1 text-emerald-300">
             <Zap className="w-3.5 h-3.5 text-emerald-400" />
-            <span>{itRate} it/s</span>
+            <span>{itRate == null ? '--' : itRate.toFixed(1)} it/s</span>
           </div>
 
           <span className="text-slate-700 hidden sm:inline">|</span>
@@ -115,7 +114,7 @@ export const HolographicBedTelemetry: React.FC<HolographicBedTelemetryProps> = (
           {/* VRAM */}
           <div className="hidden sm:flex items-center gap-1 text-slate-300">
             <Cpu className="w-3.5 h-3.5 text-cyan-400" />
-            <span>{(vramMb / 1024).toFixed(1)} GB</span>
+            <span>{vramMb == null ? '--' : (vramMb / 1024).toFixed(1)} GB</span>
           </div>
 
           <span className="text-slate-700 hidden sm:inline">|</span>
@@ -123,7 +122,7 @@ export const HolographicBedTelemetry: React.FC<HolographicBedTelemetryProps> = (
           {/* GPU Temp */}
           <div className="hidden sm:flex items-center gap-1 text-amber-300">
             <Flame className="w-3.5 h-3.5 text-amber-400" />
-            <span>{gpuTemp}°C</span>
+            <span>{gpuTemp == null ? '--' : gpuTemp}°C</span>
           </div>
         </div>
 

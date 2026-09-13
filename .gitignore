@@ -6,3 +6,8 @@ coverage/
 *.log
 .env*
 !.env.example
+server/.venv/
+__pycache__/
+.ruff_cache/
+.claude/
+printforge.zip

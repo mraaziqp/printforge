@@ -6,19 +6,13 @@ import {
   Maximize2, 
   Download, 
   RotateCcw, 
-  Check, 
   X, 
-  Sliders, 
-  ArrowUpDown,
   Magnet,
-  Layers,
-  Sparkles
 } from 'lucide-react';
 import * as THREE from 'three';
 import { 
   HolePunchConfig, 
   TextEmbossConfig, 
-  ScalingConfig, 
   HolePreset, 
   HoleAxis 
 } from '../types';
@@ -348,7 +342,7 @@ export const MeshModifierDrawer: React.FC<MeshModifierDrawerProps> = ({
                 <span>Standard Hardware Preset</span>
               </label>
               <div className="grid grid-cols-2 gap-1.5">
-                {(['M3', 'M4', 'M5', 'Magnet-6x3'] as HolePreset[]).map((preset) => {
+                {(['M3', 'M4', 'M5', 'Magnet-6x3', 'Custom'] as HolePreset[]).map((preset) => {
                   const spec = HOLE_PRESET_SPECS[preset];
                   const isSel = holePreset === preset;
                   return (
@@ -373,12 +367,29 @@ export const MeshModifierDrawer: React.FC<MeshModifierDrawerProps> = ({
                         {preset === 'Magnet-6x3' && <Magnet className="w-3 h-3 text-cyan-400" />}
                       </div>
                       <span className="text-[10px] text-slate-400 block font-normal">
-                        Ø {spec.diameter}mm
+                        Ø {preset === 'Custom' ? customDiameter : spec.diameter}mm
                       </span>
                     </button>
                   );
                 })}
               </div>
+              {holePreset === 'Custom' && (
+                <label className="mt-2 flex items-center justify-between gap-2 text-slate-300">
+                  <span>Custom diameter (mm)</span>
+                  <input
+                    type="number"
+                    min={0.5}
+                    max={50}
+                    step={0.1}
+                    value={customDiameter}
+                    onChange={(e) => {
+                      const value = Number(e.target.value);
+                      if (Number.isFinite(value)) setCustomDiameter(Math.min(50, Math.max(0.5, value)));
+                    }}
+                    className="w-20 bg-slate-950 border border-slate-700 rounded px-2 py-1 text-right font-mono text-cyan-300 focus:outline-none focus:border-cyan-500"
+                  />
+                </label>
+              )}
             </div>
 
             {/* Axis Selector */}
