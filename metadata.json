@@ -1,0 +1,6 @@
+{
+  "name": "PrintForge",
+  "description": "3D Print Community Marketplace and Local AI Generator with interactive 3D viewport, slicing estimation, and creator monetization.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
